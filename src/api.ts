@@ -2,10 +2,10 @@ export type Evaluation = { cp: number; mate: number | null }
 export type Classification = 'best' | 'good' | 'inaccuracy' | 'mistake' | 'blunder'
 export type GameMove = { ply: number; move_number: number; color: 'white' | 'black'; san: string; uci: string; fen_before: string; fen_after: string }
 export type Game = { game_id: string; headers: Record<string, string>; start_fen: string; moves: GameMove[] }
-export type ReviewedMove = { ply: number; color: 'white' | 'black'; san: string; uci: string; eval_before: Evaluation; eval_after: Evaluation; best_move_uci: string; best_move_san: string; cp_loss: number; classification: Classification }
+export type ReviewedMove = { ply: number; color: 'white' | 'black'; san: string; uci: string; eval_before: Evaluation; eval_after: Evaluation; best_move_uci: string | null; best_move_san: string | null; cp_loss: number; classification: Classification }
 export type Review = { game_id: string; time_limit: number; moves: ReviewedMove[]; critical_moments: number[] }
 type Line = { eval: Evaluation; moves_san: string[] }
-export type Explanation = { game_id: string; ply: number; explanation: string; llm_used: boolean; error: string | null; facts: { fen_before: string; played_san: string; classification: Classification; cp_loss: number; eval_before: Evaluation; eval_after: Evaluation; best_lines: Line[]; reply_line: Line } }
+export type Explanation = { game_id: string; ply: number; explanation: string; llm_used: boolean; error: string | null; facts: { fen_before: string; played_san: string; classification: Classification; cp_loss: number; eval_before: Evaluation; eval_after: Evaluation; best_lines: Line[]; reply_line: Line | null } }
 export class ApiError extends Error {
   status: number
   constructor(status: number, message: string) { super(message); this.status = status }
