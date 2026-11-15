@@ -11,14 +11,17 @@ PGN = "1. e4 e5 2. Qh5 Nc6 3. Bc4 Nf6 4. Qxf7#"
 
 
 class FakeLLM:
-    def __init__(self, answer="Nf6 allowed mate. Play g6 instead.", fail=False):
-        self.answer, self.fail, self.messages = answer, fail, []
+    """Returns `answers` in order (the last one repeats)."""
+
+    def __init__(self, answer="Nf6 allowed Qxf7#. Play g6 instead.", fail=False, answers=None):
+        self.answers = answers or [answer]
+        self.answer, self.fail, self.messages = self.answers[0], fail, []
 
     def chat(self, messages, tools=None):
-        self.messages.append(messages)
+        self.messages.append(list(messages))
         if self.fail:
             raise LLMError("LLM rate limit reached.")
-        return LLMReply(content=self.answer)
+        return LLMReply(content=self.answers[min(len(self.messages), len(self.answers)) - 1])
 
 
 def scripted_engine():
@@ -35,7 +38,7 @@ def upload(client):
 
 def test_explain_uses_llm_and_sends_engine_facts():
     llm = FakeLLM()
-    client = TestClient(create_app(engine=scripted_engine(), llm=llm))
+    client = TestClient(create_app(engine=scripted_engine(), llm=llm, language="en"))
     r = client.post("/api/explain", json={"game_id": upload(client), "ply": 6})
     assert r.status_code == 200
     body = r.json()
@@ -53,7 +56,7 @@ def test_explain_uses_llm_and_sends_engine_facts():
 
 def test_explanation_is_cached():
     llm = FakeLLM()
-    client = TestClient(create_app(engine=scripted_engine(), llm=llm))
+    client = TestClient(create_app(engine=scripted_engine(), llm=llm, language="en"))
     gid = upload(client)
     client.post("/api/explain", json={"game_id": gid, "ply": 6})
     client.post("/api/explain", json={"game_id": gid, "ply": 6})
@@ -61,7 +64,7 @@ def test_explanation_is_cached():
 
 
 def test_llm_failure_falls_back_to_template():
-    client = TestClient(create_app(engine=scripted_engine(), llm=FakeLLM(fail=True)))
+    client = TestClient(create_app(engine=scripted_engine(), llm=FakeLLM(fail=True), language="en"))
     body = client.post("/api/explain", json={"game_id": upload(client), "ply": 6}).json()
     assert body["llm_used"] is False
     assert "rate limit" in body["error"]
@@ -70,13 +73,13 @@ def test_llm_failure_falls_back_to_template():
 
 
 def test_no_llm_configured_still_returns_facts():
-    client = TestClient(create_app(engine=scripted_engine(), llm=None))
+    client = TestClient(create_app(engine=scripted_engine(), llm=None, language="en"))
     body = client.post("/api/explain", json={"game_id": upload(client), "ply": 6}).json()
     assert body["llm_used"] is False and "LLM_API_KEY" in body["error"]
 
 
 def test_ply_out_of_range():
-    client = TestClient(create_app(engine=scripted_engine(), llm=FakeLLM()))
+    client = TestClient(create_app(engine=scripted_engine(), llm=FakeLLM(), language="en"))
     r = client.post("/api/explain", json={"game_id": upload(client), "ply": 99})
     assert r.status_code == 422
 
@@ -97,7 +100,7 @@ class DeepDisagreesEngine(FakeEngine):
 def test_explanation_leads_with_same_best_move_as_analysis():
     g = parse_pgn(PGN)
     eng = DeepDisagreesEngine(best={g.moves[5].fen_before: "g7g6"})
-    client = TestClient(create_app(engine=eng, llm=FakeLLM()))
+    client = TestClient(create_app(engine=eng, llm=FakeLLM(), language="en"))
     gid = upload(client)
     table = client.post(f"/api/games/{gid}/analyze").json()["moves"][5]
     facts = client.post("/api/explain", json={"game_id": gid, "ply": 6}).json()["facts"]
@@ -108,7 +111,7 @@ def test_explanation_leads_with_same_best_move_as_analysis():
 def test_best_played_mating_move_is_kept_in_explanation():
     g = parse_pgn(PGN)
     eng = FakeEngine(best={g.moves[6].fen_before: "h5f7"})
-    client = TestClient(create_app(engine=eng, llm=None))
+    client = TestClient(create_app(engine=eng, llm=None, language="en"))
     gid = upload(client)
     table = client.post(f"/api/games/{gid}/analyze").json()["moves"][6]
     body = client.post("/api/explain", json={"game_id": gid, "ply": 7}).json()
@@ -117,3 +120,41 @@ def test_best_played_mating_move_is_kept_in_explanation():
     assert body["facts"]["best_lines"][0]["moves_san"][0] == "Qxf7#"
     assert body["facts"]["reply_line"] is None
     assert "best move was Qxf7#" in body["explanation"]
+
+
+def test_prompt_lists_pieces_and_explains_moves():
+    llm = FakeLLM()
+    client = TestClient(create_app(engine=scripted_engine(), llm=llm, language="ru"))
+    client.post("/api/explain", json={"game_id": upload(client), "ply": 6})
+    system, user = llm.messages[0][0]["content"], llm.messages[0][1]["content"]
+    assert "Russian" in system
+    assert '"queen h5"' in user and '"bishop c4"' in user
+    assert "Qxf7# = white queen h5->f7, captures pawn, check, checkmate" in user
+    assert '"classification_word_to_use": "грубая ошибка"' in user
+
+
+def test_invented_move_triggers_one_rewrite():
+    llm = FakeLLM(answers=["Better was Nc3 or Bb5.", "Nf6 allowed Qxf7#; g6 was better."])
+    client = TestClient(create_app(engine=scripted_engine(), llm=llm, language="en"))
+    body = client.post("/api/explain", json={"game_id": upload(client), "ply": 6}).json()
+    assert body["llm_used"] is True
+    assert body["explanation"] == "Nf6 allowed Qxf7#; g6 was better."
+    assert len(llm.messages) == 2
+    assert "Bb5, Nc3" in llm.messages[1][-1]["content"]
+
+
+def test_persistent_invented_moves_fall_back_to_template():
+    llm = FakeLLM(answers=["Play Nc3!", "Still Nc3."])
+    client = TestClient(create_app(engine=scripted_engine(), llm=llm, language="en"))
+    body = client.post("/api/explain", json={"game_id": upload(client), "ply": 6}).json()
+    assert body["llm_used"] is False
+    assert "Nc3" in body["error"]
+    assert "Nf6 is classified as blunder" in body["explanation"]
+
+
+def test_russian_template():
+    client = TestClient(create_app(engine=scripted_engine(), llm=None, language="ru"))
+    text = client.post("/api/explain", json={"game_id": upload(client), "ply": 6}).json()["explanation"]
+    assert text.startswith("Nf6: грубая ошибка (допускает форсированный мат).")
+    assert "у белых мат в 1" in text
+    assert "Лучший ход по движку: g6." in text

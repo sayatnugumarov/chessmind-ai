@@ -54,3 +54,19 @@ Real HTTP integration with Fool's Mate exposed that filtering the played move ou
 of alternatives also removed it when it was the engine's best move. Keep it in
 that case, so `/explain` agrees with `/analyze`, including on a mating move.
 The frontend also handles nullable `reply_line` and best-move fields from schemas.py.
+
+## D8 — Grounded, Russian coach explanations (2026-11-15)
+First real run with Groq showed the explanation in English while the UI is Russian, plus geometry
+errors (e.g. "g4 opens the a8–h1 diagonal", "the f-pawn is still on f2" after 1.f3).
+Changes:
+- `COACH_LANGUAGE` (default `ru`): prompt instructions stay in English, the answer is in Russian;
+  moves keep standard English SAN (as on the board). The fallback template is translated too.
+- The prompt no longer relies on the model reading FEN: python-chess lists every piece's square and
+  spells out each engine move ("Qh4# = black queen d8->h4, check, checkmate"). The model is told to
+  leave out geometry it cannot derive from these facts, and gets the exact word for the classification.
+- Answers are checked for piece moves/captures/castling that are not in the engine facts. One rewrite
+  is requested; if moves are still invented, the fact-only template is returned (`llm_used: false`).
+  Quiet pawn moves ("e3") are not checked because they are indistinguishable from square names.
+**Result:** on 4 test moves all answers were Russian with correct squares; no rewrite was needed.
+Remaining weakness: occasional awkward wording and unverifiable strategic claims → measured in the
+AI evaluation, not solved by rules.

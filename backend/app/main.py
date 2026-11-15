@@ -30,7 +30,11 @@ class GameRecord:
 _DEFAULT = object()
 
 
-def create_app(engine: EngineLike | None = None, llm: "LLM | None | object" = _DEFAULT) -> FastAPI:
+def create_app(
+    engine: EngineLike | None = None,
+    llm: "LLM | None | object" = _DEFAULT,
+    language: str | None = None,
+) -> FastAPI:
     """Pass `engine`/`llm` in tests; otherwise real Stockfish and the configured LLM are used."""
 
     @asynccontextmanager
@@ -48,6 +52,7 @@ def create_app(engine: EngineLike | None = None, llm: "LLM | None | object" = _D
     app = FastAPI(title="ChessMind AI", version="0.1.0", lifespan=lifespan)
     app.state.engine = engine
     app.state.llm = get_llm() if llm is _DEFAULT else llm
+    app.state.language = language or settings.coach_language
     app.state.games: dict[str, GameRecord] = {}  # in-memory; lost on restart (fine for MVP)
     app.add_middleware(
         CORSMiddleware,
@@ -100,7 +105,7 @@ def create_app(engine: EngineLike | None = None, llm: "LLM | None | object" = _D
         analysis = _ensure_analysis(request, record, settings.engine_time_limit)[body.ply - 1]
         move = record.parsed.moves[body.ply - 1]
         facts = build_facts(move, analysis, _get_engine(request), settings.engine_deep_time_limit)
-        text, llm_used, error = explain_move(move, facts, request.app.state.llm)
+        text, llm_used, error = explain_move(move, facts, request.app.state.llm, request.app.state.language)
         result = schemas.Explanation(
             game_id=body.game_id, ply=body.ply, explanation=text, llm_used=llm_used, error=error, facts=facts
         )

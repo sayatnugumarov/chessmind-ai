@@ -8,7 +8,8 @@ from .. import schemas
 from ..analysis import EngineLike, line_to_san, to_eval
 from ..pgn import MoveRecord
 from .llm import LLM, LLMError
-from .prompts import EXPLAIN_SYSTEM
+from .board_facts import describe_line, describe_move, mentioned_moves, normalize_san, piece_list
+from .prompts import FIX_MOVES, explain_system
 
 
 def format_eval(e: schemas.Evaluation) -> str:
@@ -62,62 +63,134 @@ def build_facts(
     )
 
 
-def facts_for_prompt(move: MoveRecord, facts: schemas.EngineFacts) -> str:
+def facts_for_prompt(move: MoveRecord, facts: schemas.EngineFacts, language: str = "en") -> str:
     board = chess.Board(move.fen_before)
+    board_after = chess.Board(move.fen_after)
     played = chess.Move.from_uci(move.uci)
     data = {
-        "position_fen": facts.fen_before,
-        "side_to_move": move.color,
+        "side_that_moved": move.color,
         "move_number": move.move_number,
+        "pieces_before_move": piece_list(board),
         "played_move": facts.played_san,
-        "played_move_is_capture": board.is_capture(played),
-        "played_move_gives_check": board.gives_check(played),
+        "played_move_description": describe_move(board, played),
         "classification": facts.classification,
+        "classification_word_to_use": _TEMPLATE.get(language, _TEMPLATE["en"])["names"][facts.classification],
         "centipawns_lost": facts.cp_loss,
         "eval_before_move (White POV, pawns)": format_eval(facts.eval_before),
         "eval_after_move (White POV, pawns)": format_eval(facts.eval_after),
         "engine_best_lines_instead": [
-            {"eval": format_eval(l.eval), "moves": " ".join(l.moves_san)} for l in facts.best_lines
+            {
+                "eval": format_eval(l.eval),
+                "moves": " ".join(l.moves_san),
+                "first_moves_explained": describe_line(board, l.moves_san, 2),
+            }
+            for l in facts.best_lines
         ],
         "engine_continuation_after_played_move": (
-            " ".join(facts.reply_line.moves_san) if facts.reply_line else "none (game over)"
+            {
+                "moves": " ".join(facts.reply_line.moves_san),
+                "first_moves_explained": describe_line(board_after, facts.reply_line.moves_san, 3),
+            }
+            if facts.reply_line
+            else "none (game over)"
         ),
     }
-    return json.dumps(data, indent=2)
+    return json.dumps(data, indent=2, ensure_ascii=False)
 
 
-def template_explanation(facts: schemas.EngineFacts) -> str:
+def allowed_moves(facts: schemas.EngineFacts) -> set[str]:
+    sans = [facts.played_san]
+    for line in facts.best_lines:
+        sans += line.moves_san
+    if facts.reply_line:
+        sans += facts.reply_line.moves_san
+    return {normalize_san(s) for s in sans}
+
+
+def invented_moves(text: str, facts: schemas.EngineFacts) -> list[str]:
+    """Moves named in `text` that are not in the engine facts (sorted, for messages)."""
+    return sorted(mentioned_moves(text) - allowed_moves(facts))
+
+
+_TEMPLATE = {
+    "ru": {
+        "names": {"best": "лучший ход", "good": "хороший ход", "inaccuracy": "неточность",
+                  "mistake": "ошибка", "blunder": "грубая ошибка"},
+        "mate_allowed": "допускает форсированный мат",
+        "lost": "потеря около {pawns} пешки",
+        "head": "{move}: {cls} ({cost}). Оценка изменилась с {before} на {after}.",
+        "best": " Лучший ход по движку: {move}.",
+        "reply": " После {move} сильное продолжение: {line}.",
+    },
+    "en": {
+        "names": {"best": "best", "good": "good", "inaccuracy": "inaccuracy",
+                  "mistake": "mistake", "blunder": "blunder"},
+        "mate_allowed": "it allows a forced mate",
+        "lost": "about {pawns} pawns lost",
+        "head": "{move} is classified as {cls} ({cost}). Evaluation went from {before} to {after}.",
+        "best": " The engine's best move was {move}.",
+        "reply": " After {move}, a strong continuation is {line}.",
+    },
+}
+
+
+def format_eval_lang(e: schemas.Evaluation, language: str) -> str:
+    if language != "ru" or e.mate is None:
+        return format_eval(e)
+    if e.mate == 0:
+        return "мат (партия окончена)"
+    return f"{'у белых' if e.mate > 0 else 'у чёрных'} мат в {abs(e.mate)}"
+
+
+def template_explanation(facts: schemas.EngineFacts, language: str = "en") -> str:
     """Used when the LLM is unavailable: plain facts, no invented reasoning."""
+    t = _TEMPLATE.get(language, _TEMPLATE["en"])
     after = facts.eval_after
     if after.mate and facts.classification == "blunder" and facts.eval_before.mate is None:
-        cost = "it allows a forced mate"
+        cost = t["mate_allowed"]
     else:
-        cost = f"about {facts.cp_loss / 100:.1f} pawns lost"
-    text = (
-        f"{facts.played_san} is classified as {facts.classification} ({cost}). "
-        f"Evaluation went from {format_eval(facts.eval_before)} to {format_eval(after)}."
+        cost = t["lost"].format(pawns=f"{facts.cp_loss / 100:.1f}")
+    text = t["head"].format(
+        move=facts.played_san, cls=t["names"][facts.classification], cost=cost,
+        before=format_eval_lang(facts.eval_before, language), after=format_eval_lang(after, language),
     )
     if facts.best_lines and facts.best_lines[0].moves_san:
-        text += f" The engine's best move was {facts.best_lines[0].moves_san[0]}."
+        text += t["best"].format(move=facts.best_lines[0].moves_san[0])
     if facts.reply_line and facts.reply_line.moves_san:
-        text += f" After {facts.played_san}, a strong continuation is {' '.join(facts.reply_line.moves_san[:3])}."
+        text += t["reply"].format(move=facts.played_san, line=" ".join(facts.reply_line.moves_san[:3]))
     return text
 
 
 def explain_move(
-    move: MoveRecord, facts: schemas.EngineFacts, llm: LLM | None
+    move: MoveRecord, facts: schemas.EngineFacts, llm: LLM | None, language: str = "en"
 ) -> tuple[str, bool, str | None]:
-    """Returns (explanation, llm_used, error_message)."""
+    """Returns (explanation, llm_used, error_message).
+
+    The answer is checked for moves that are not in the engine facts; the model gets one
+    chance to rewrite it, otherwise the fact-only template is returned.
+    """
+    def fallback(error: str) -> tuple[str, bool, str | None]:
+        return template_explanation(facts, language), False, error
+
     if llm is None:
-        return template_explanation(facts), False, "LLM not configured (set LLM_API_KEY)."
+        return fallback("LLM not configured (set LLM_API_KEY).")
     messages = [
-        {"role": "system", "content": EXPLAIN_SYSTEM},
-        {"role": "user", "content": "Explain this move to the player.\n\n" + facts_for_prompt(move, facts)},
+        {"role": "system", "content": explain_system(language)},
+        {"role": "user", "content": "Explain this move to the player.\n\n" + facts_for_prompt(move, facts, language)},
     ]
     try:
-        reply = llm.chat(messages)
+        for attempt in range(2):
+            reply = llm.chat(messages)
+            if not reply.content:
+                return fallback("LLM returned an empty answer.")
+            bad = invented_moves(reply.content, facts)
+            if not bad:
+                return reply.content, True, None
+            if attempt == 0:
+                messages += [
+                    {"role": "assistant", "content": reply.content},
+                    {"role": "user", "content": FIX_MOVES.format(moves=", ".join(bad))},
+                ]
     except LLMError as e:
-        return template_explanation(facts), False, str(e)
-    if not reply.content:
-        return template_explanation(facts), False, "LLM returned an empty answer."
-    return reply.content, True, None
+        return fallback(str(e))
+    return fallback(f"LLM mentioned moves not in the engine analysis: {', '.join(bad)}.")

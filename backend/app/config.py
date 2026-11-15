@@ -28,6 +28,7 @@ class Settings:
     )
     llm_api_key: str = field(default_factory=lambda: os.getenv("LLM_API_KEY", ""))
     llm_model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "openai/gpt-oss-120b"))
+    coach_language: str = field(default_factory=lambda: os.getenv("COACH_LANGUAGE", "ru"))
     cors_origins: list[str] = field(
         default_factory=lambda: [
             o.strip()

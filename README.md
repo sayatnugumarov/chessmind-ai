@@ -29,6 +29,7 @@ Requirements: Python 3.12, Stockfish, a free LLM API key (Groq recommended).
    - `STOCKFISH_PATH` — full path to the Stockfish `.exe`
    - `LLM_API_KEY` — key from https://console.groq.com (free). To use Gemini or OpenAI instead,
      change `LLM_BASE_URL` and `LLM_MODEL` (examples in `.env.example`).
+   - `COACH_LANGUAGE` — `ru` (default) or `en`, the language of coach explanations.
 
    `.env` is git-ignored. **Never commit API keys.**
 4. **Run**
